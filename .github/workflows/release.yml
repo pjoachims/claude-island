@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal app
+        run: VERSION="${GITHUB_REF_NAME#v}" ./build.sh --universal
+      - name: Zip
+        run: ditto -c -k --keepParent "Claude Island.app" "ClaudeIsland-${GITHUB_REF_NAME}.zip"
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" "ClaudeIsland-${GITHUB_REF_NAME}.zip" --title "Claude Island $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

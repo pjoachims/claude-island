@@ -11,14 +11,17 @@ all your Claude Code sessions.
 
 ## Install
 
-Download `ClaudeIsland-vX.Y.Z.zip` from
-[Releases](https://github.com/pjoachims/claude-island/releases), unzip, and move
-`Claude Island.app` to `/Applications`. The app is ad-hoc signed, so on first
-launch macOS will complain; clear the quarantine flag:
-
 ```sh
-xattr -dr com.apple.quarantine "/Applications/Claude Island.app"
+curl -fsSL https://raw.githubusercontent.com/pjoachims/claude-island/main/install.sh | sh
 ```
+
+Downloads the latest [release](https://github.com/pjoachims/claude-island/releases)
+into `/Applications` and launches it.
+
+If you download the zip in a browser instead, macOS will block the app ("Apple
+could not verify...") because it's ad-hoc signed, not notarized. Either use the
+installer above (curl downloads skip quarantine), or after the blocked launch go
+to System Settings → Privacy & Security → "Open Anyway".
 
 ### Build from source
 

@@ -51,14 +51,17 @@ enum Config {
         return tabs
     }
 
-    // materialize the default config so "Edit Tabs…" has a file to open
-    static func writeDefaultTabsIfMissing() {
-        let fm = FileManager.default
-        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        guard !fm.fileExists(atPath: tabsFile) else { return }
+    static func save(_ tabs: [TabSpec]) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
-        try? (try? enc.encode(defaultTabs))?.write(to: URL(fileURLWithPath: tabsFile))
+        try? (try? enc.encode(tabs))?.write(to: URL(fileURLWithPath: tabsFile))
+    }
+
+    // materialize the default config so "Edit Tabs…" has a file to open
+    static func writeDefaultTabsIfMissing() {
+        guard !FileManager.default.fileExists(atPath: tabsFile) else { return }
+        save(defaultTabs)
     }
 }
 
@@ -107,6 +110,29 @@ final class Store: ObservableObject {
     }
 
     var selectedTab: TabSpec { tabs.first { $0.name == selected } ?? tabs[0] }
+
+    @Published var addingTab = false
+
+    func addTab(name: String, command: String, notes: Bool) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty, !tabs.contains(where: { $0.name == n }) else { return }
+        let cmd = command.trimmingCharacters(in: .whitespaces)
+        tabs.append(.init(
+            name: n,
+            command: notes || cmd.isEmpty ? nil : cmd,
+            type: notes ? "notes" : nil))
+        Config.save(tabs)
+        selected = n
+        addingTab = false
+    }
+
+    func removeTab(_ name: String) {
+        guard tabs.count > 1, let i = tabs.firstIndex(where: { $0.name == name }) else { return }
+        tabs.remove(at: i)
+        PaneHost.shared.shutdown(name)
+        Config.save(tabs)
+        if selected == name { selected = tabs[0].name }
+    }
 
     // pick up edits to tabs.json (called on each expand); panes of removed tabs die
     func reloadTabs() {
@@ -233,6 +259,10 @@ struct IslandView: View {
     var notchH: CGFloat
     var onHover: (Bool) -> Void
     var onResize: (Bool) -> Void // ended?
+    @State private var newName = ""
+    @State private var newCommand = ""
+    @State private var newNotes = false
+    @FocusState private var nameFocus: Bool
 
     var body: some View {
         // overlays don't inflate layout: a fixed-size child in a ZStack made the
@@ -291,32 +321,95 @@ struct IslandView: View {
 
     var tabBar: some View {
         HStack(spacing: 4) {
-            ForEach(store.tabs, id: \.name) { tab in
-                Button { store.selected = tab.name } label: {
-                    Text(tab.name)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(store.selected == tab.name ? Color.white : Color.gray)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 3)
-                        .background(
-                            store.selected == tab.name ? Color.white.opacity(0.15) : Color.clear,
-                            in: Capsule())
+            if store.addingTab {
+                addForm
+            } else {
+                ForEach(store.tabs, id: \.name) { tab in
+                    Button { store.selected = tab.name } label: {
+                        Text(tab.name)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(store.selected == tab.name ? Color.white : Color.gray)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 3)
+                            .background(
+                                store.selected == tab.name ? Color.white.opacity(0.15) : Color.clear,
+                                in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Remove \"\(tab.name)\"") { store.removeTab(tab.name) }
+                    }
+                }
+                Button { store.addingTab = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.gray)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
                 }
                 .buttonStyle(.plain)
             }
-            // add your own tabs: opens tabs.json (picked up on next expand)
-            Button {
-                NSWorkspace.shared.open(URL(fileURLWithPath: Config.tabsFile))
-            } label: {
-                Image(systemName: "plus")
+        }
+        .frame(height: 22)
+    }
+
+    // inline add row — a popover would be its own window, the panel would lose
+    // key status, and the collapse timer would fold the island mid-typing
+    var addForm: some View {
+        HStack(spacing: 8) {
+            TextField("Name", text: $newName)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: 70)
+                .focused($nameFocus)
+            if !newNotes {
+                TextField("command · empty = shell", text: $newCommand)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(width: 210)
+            }
+            Toggle("notes", isOn: $newNotes)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 10))
+                .foregroundStyle(Color.gray)
+            Button("Add") { submitNewTab() }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(canAdd ? Color.white : Color.gray.opacity(0.5))
+                .disabled(!canAdd)
+            Button { cancelNewTab() } label: {
+                Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Color.gray)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 5)
             }
             .buttonStyle(.plain)
         }
-        .frame(height: 22)
+        .onSubmit { submitNewTab() }
+        .onExitCommand { cancelNewTab() }
+        .onAppear {
+            // panel only becomes key a beat after the + click; focus too early is dropped
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { nameFocus = true }
+        }
+    }
+
+    var canAdd: Bool {
+        let n = newName.trimmingCharacters(in: .whitespaces)
+        return !n.isEmpty && !store.tabs.contains { $0.name == n }
+    }
+
+    func submitNewTab() {
+        guard canAdd else { return }
+        store.addTab(name: newName, command: newCommand, notes: newNotes)
+        cancelNewTab()
+    }
+
+    func cancelNewTab() {
+        store.addingTab = false
+        newName = ""
+        newCommand = ""
+        newNotes = false
     }
 
     // drag to resize the expanded island; AppDelegate tracks the mouse in screen
@@ -400,6 +493,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.$launchDir
             .dropFirst()
             .sink { _ in PaneHost.shared.shutdownAll() }
+            .store(in: &bag)
+
+        // the + form needs key status for its text fields before any field click
+        store.$addingTab
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] adding in
+                guard let self, adding else { return }
+                self.typedSinceExpand = true // pin open while the form is up
+                self.panel.makeKey()
+                // steal the keyboard back from the pane so @FocusState can take it
+                self.panel.makeFirstResponder(self.panel.contentView)
+            }
             .store(in: &bag)
 
         // switching tabs while expanded moves the keyboard to the new pane

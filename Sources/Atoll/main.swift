@@ -176,6 +176,31 @@ final class IslandTerminalView: LocalProcessTerminalView {
         return super.performKeyEquivalent(with: event)
     }
 
+    // SwiftTerm only reports left-button events on macOS, so right-clicks fall
+    // through NSView's default path into the island's SwiftUI context menu.
+    // Forward them to the TUI when it asked for mouse events, swallow them
+    // otherwise — the island menu lives on the chrome (pill, margins, tab bar).
+    override func rightMouseDown(with event: NSEvent) { sendRightButton(event, release: false) }
+    override func rightMouseUp(with event: NSEvent) { sendRightButton(event, release: true) }
+
+    private func sendRightButton(_ event: NSEvent, release: Bool) {
+        let t = getTerminal()
+        // sendButtonPress()/sendButtonRelease() are internal to SwiftTerm; same checks
+        let m = t.mouseMode
+        let wants = release ? m != .off : (m == .vt200 || m == .buttonEventTracking || m == .anyEvent)
+        guard wants else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        let col = max(0, min(t.cols - 1, Int(p.x / (bounds.width / CGFloat(t.cols)))))
+        let row = max(0, min(t.rows - 1, Int((bounds.height - p.y) / (bounds.height / CGFloat(t.rows)))))
+        // xterm right button is 2 (macOS buttonNumber says 1, so encode explicitly)
+        let flags = t.encodeButton(
+            button: 2, release: release,
+            shift: event.modifierFlags.contains(.shift),
+            meta: event.modifierFlags.contains(.option),
+            control: event.modifierFlags.contains(.control))
+        t.sendEvent(buttonFlags: flags, x: col, y: row)
+    }
+
     // image on the clipboard (e.g. a screenshot): Claude Code reads the clipboard
     // itself when it sees ^V, so replay ⌘V as a ^V keypress and let it do the work
     override func paste(_ sender: Any) {

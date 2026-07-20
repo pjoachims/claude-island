@@ -2,7 +2,7 @@
 
 Dynamic-island-style notch app for macOS: hover the notch (or hit the hotkey)
 and it expands into a tabbed workspace that's always with you — Claude Code
-FleetView, herdr, a scratchpad, a shell, or any terminal command you configure.
+FleetView, a scratchpad, a shell, or any terminal command you configure.
 
 - Collapsed: black pill under the notch.
 - Hover or hotkey (default ⌃⌥ Space): expands into the selected tab.
@@ -24,14 +24,14 @@ scratchpad (autosaved to `~/.config/atoll/notes.md`):
 ```json
 [
   { "name": "Fleet", "command": "~/.local/bin/claude agents" },
-  { "name": "herdr", "command": "herdr" },
-  { "name": "Notes", "type": "notes" },
-  { "name": "Shell" }
+  { "name": "Notes", "type": "notes" }
 ]
 ```
 
-An entry without `command` opens a plain login shell. Commands run via
-`zsh -lc` in the configured launch directory, so anything on your PATH works.
+Add your own with the "+" button in the tab bar (opens the config). An entry
+without `command` opens a plain login shell (`{ "name": "Shell" }`). Commands
+run via `zsh -lc` in the configured launch directory, so anything on your
+PATH works — e.g. `{ "name": "herdr", "command": "herdr" }`.
 
 ## Install
 

@@ -40,9 +40,7 @@ enum Config {
 
     static let defaultTabs: [TabSpec] = [
         .init(name: "Fleet", command: "~/.local/bin/claude agents", type: nil),
-        .init(name: "herdr", command: "herdr", type: nil),
         .init(name: "Notes", command: nil, type: "notes"),
-        .init(name: "Shell", command: nil, type: nil),
     ]
 
     static func loadTabs() -> [TabSpec] {
@@ -306,6 +304,17 @@ struct IslandView: View {
                 }
                 .buttonStyle(.plain)
             }
+            // add your own tabs: opens tabs.json (picked up on next expand)
+            Button {
+                NSWorkspace.shared.open(URL(fileURLWithPath: Config.tabsFile))
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.gray)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 5)
+            }
+            .buttonStyle(.plain)
         }
         .frame(height: 22)
     }

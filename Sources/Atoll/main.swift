@@ -425,6 +425,7 @@ struct IslandView: View {
         .onSubmit { submitNewTab() }
         .onExitCommand { cancelNewTab() }
         .onAppear {
+            store.scanTools() // tools installed since launch show up as chips
             // panel only becomes key a beat after the + click; focus too early is dropped
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { nameFocus = true }
         }

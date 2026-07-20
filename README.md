@@ -28,8 +28,9 @@ scratchpad (autosaved to `~/.config/atoll/notes.md`):
 ]
 ```
 
-Add your own with the "+" button in the tab bar — name, command (or notes),
-Enter. Right-click a tab to remove it. An entry without `command` opens a
+Add your own with the "+" button: one click on a suggested tool found on
+your PATH (herdr, lazygit, btop, …) or a Shell/Notes pane, or type a name
+and any command. Right-click a tab to remove it. An entry without `command` opens a
 plain login shell (`{ "name": "Shell" }`). Commands run via `zsh -lc` in the
 configured launch directory, so anything on your PATH works — e.g.
 `{ "name": "herdr", "command": "herdr" }`.

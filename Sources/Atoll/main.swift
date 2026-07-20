@@ -112,6 +112,25 @@ final class Store: ObservableObject {
     var selectedTab: TabSpec { tabs.first { $0.name == selected } ?? tabs[0] }
 
     @Published var addingTab = false
+    // CLI tools found on PATH, offered as one-click tabs in the + card
+    @Published var foundTools: [String] = []
+
+    func scanTools() {
+        let candidates = ["herdr", "lazygit", "btop", "htop", "k9s", "yazi", "ranger"]
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-lc", "for t in \(candidates.joined(separator: " ")); do command -v $t >/dev/null 2>&1 && echo $t; done"]
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let found = out.split(separator: "\n").map(String.init)
+            DispatchQueue.main.async { self.foundTools = found }
+        }
+    }
 
     func addTab(name: String, command: String, notes: Bool) {
         let n = name.trimmingCharacters(in: .whitespaces)
@@ -261,7 +280,6 @@ struct IslandView: View {
     var onResize: (Bool) -> Void // ended?
     @State private var newName = ""
     @State private var newCommand = ""
-    @State private var newNotes = false
     @FocusState private var nameFocus: Bool
 
     var body: some View {
@@ -279,6 +297,9 @@ struct IslandView: View {
                     tabBar
                     pane
                         .frame(width: store.termW, height: store.termH)
+                        .overlay(alignment: .top) {
+                            if store.addingTab { addCard.padding(.top, 4) }
+                        }
                 }
                 .padding(.top, notchH + 8)
                 .opacity(store.expanded && !store.resizing ? 1 : 0)
@@ -321,77 +342,108 @@ struct IslandView: View {
 
     var tabBar: some View {
         HStack(spacing: 4) {
-            if store.addingTab {
-                addForm
-            } else {
-                ForEach(store.tabs, id: \.name) { tab in
-                    Button { store.selected = tab.name } label: {
-                        Text(tab.name)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(store.selected == tab.name ? Color.white : Color.gray)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 3)
-                            .background(
-                                store.selected == tab.name ? Color.white.opacity(0.15) : Color.clear,
-                                in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button("Remove \"\(tab.name)\"") { store.removeTab(tab.name) }
-                    }
-                }
-                Button { store.addingTab = true } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Color.gray)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 5)
+            ForEach(store.tabs, id: \.name) { tab in
+                Button { store.selected = tab.name } label: {
+                    Text(tab.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(store.selected == tab.name ? Color.white : Color.gray)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 3)
+                        .background(
+                            store.selected == tab.name ? Color.white.opacity(0.15) : Color.clear,
+                            in: Capsule())
                 }
                 .buttonStyle(.plain)
+                .contextMenu {
+                    Button("Remove \"\(tab.name)\"") { store.removeTab(tab.name) }
+                }
             }
+            Button { store.addingTab.toggle() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(store.addingTab ? Color.white : Color.gray)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 5)
+            }
+            .buttonStyle(.plain)
         }
         .frame(height: 22)
     }
 
-    // inline add row — a popover would be its own window, the panel would lose
-    // key status, and the collapse timer would fold the island mid-typing
-    var addForm: some View {
-        HStack(spacing: 8) {
-            TextField("Name", text: $newName)
-                .textFieldStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white)
-                .frame(width: 70)
-                .focused($nameFocus)
-            if !newNotes {
-                TextField("command · empty = shell", text: $newCommand)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 11, design: .monospaced))
+    // + card: one-click chips for tools found on PATH, custom row below.
+    // Drawn inside the panel — a popover would be its own window, the panel
+    // would lose key status, and the collapse timer would fold the island.
+    var addCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("New tab")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 210)
-            }
-            Toggle("notes", isOn: $newNotes)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 10))
-                .foregroundStyle(Color.gray)
-            Button("Add") { submitNewTab() }
+                Spacer()
+                Button { cancelNewTab() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Color.gray)
+                }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(canAdd ? Color.white : Color.gray.opacity(0.5))
-                .disabled(!canAdd)
-            Button { cancelNewTab() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.gray)
             }
-            .buttonStyle(.plain)
+            if !suggestions.isEmpty {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], spacing: 6) {
+                    ForEach(suggestions, id: \.self) { s in
+                        Button { addSuggestion(s) } label: {
+                            Text(s)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white)
+                                .padding(.vertical, 5)
+                                .frame(maxWidth: .infinity)
+                                .background(Color.white.opacity(0.1), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("Name", text: $newName)
+                    .frame(width: 76)
+                    .focused($nameFocus)
+                TextField("command · empty = shell", text: $newCommand)
+                    .font(.system(size: 11, design: .monospaced))
+                Button("Add") { submitNewTab() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(canAdd ? Color.white : Color.gray.opacity(0.5))
+                    .disabled(!canAdd)
+            }
+            .textFieldStyle(.plain)
+            .font(.system(size: 11))
+            .foregroundStyle(.white)
         }
+        .padding(12)
+        .frame(width: 360)
+        .background(Color(white: 0.13), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.08)))
         .onSubmit { submitNewTab() }
         .onExitCommand { cancelNewTab() }
         .onAppear {
             // panel only becomes key a beat after the + click; focus too early is dropped
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { nameFocus = true }
         }
+    }
+
+    // PATH tools + the built-in pane types, minus tabs that already exist
+    var suggestions: [String] {
+        (store.foundTools + ["Shell", "Notes"]).filter { s in
+            !store.tabs.contains { $0.name.caseInsensitiveCompare(s) == .orderedSame }
+        }
+    }
+
+    func addSuggestion(_ s: String) {
+        switch s {
+        case "Notes": store.addTab(name: "Notes", command: "", notes: true)
+        case "Shell": store.addTab(name: "Shell", command: "", notes: false)
+        default: store.addTab(name: s, command: s, notes: false)
+        }
+        cancelNewTab()
     }
 
     var canAdd: Bool {
@@ -401,7 +453,7 @@ struct IslandView: View {
 
     func submitNewTab() {
         guard canAdd else { return }
-        store.addTab(name: newName, command: newCommand, notes: newNotes)
+        store.addTab(name: newName, command: newCommand, notes: false)
         cancelNewTab()
     }
 
@@ -409,7 +461,6 @@ struct IslandView: View {
         store.addingTab = false
         newName = ""
         newCommand = ""
-        newNotes = false
     }
 
     // drag to resize the expanded island; AppDelegate tracks the mouse in screen
@@ -482,6 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = hosting
         // boot the selected tab's process before the first expand
         if !store.selectedTab.isNotes { _ = PaneHost.shared.terminal(for: store.selectedTab) }
+        store.scanTools() // populate the + card's suggestions
         applyHotKey()
         store.$hotkey
             .dropFirst()

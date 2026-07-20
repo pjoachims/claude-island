@@ -1,33 +1,33 @@
 #!/bin/sh
-# Build Claude Island.app (minimal bundle so Login Items / Gatekeeper are happy).
+# Build Atoll.app (minimal bundle so Login Items / Gatekeeper are happy).
 # Usage: ./build.sh [--universal]
 #   --universal   build arm64 + x86_64 (used by CI for releases)
 #   VERSION=x.y.z overrides the version (defaults to latest git tag)
 set -e
 cd "$(dirname "$0")"
-APP="Claude Island.app"
+APP="Atoll.app"
 VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null | sed 's/^v//')}"
 VERSION="${VERSION:-0.0.0}"
 
 if [ "$1" = "--universal" ]; then
   swift build -c release --arch arm64 --arch x86_64
-  BIN=".build/apple/Products/Release/ClaudeIsland"
+  BIN=".build/apple/Products/Release/Atoll"
 else
   swift build -c release
-  BIN=".build/release/ClaudeIsland"
+  BIN=".build/release/Atoll"
 fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp "$BIN" "$APP/Contents/MacOS/ClaudeIsland"
+cp "$BIN" "$APP/Contents/MacOS/Atoll"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>ClaudeIsland</string>
-  <key>CFBundleIdentifier</key><string>dev.pj.claude-island</string>
-  <key>CFBundleName</key><string>Claude Island</string>
+  <key>CFBundleExecutable</key><string>Atoll</string>
+  <key>CFBundleIdentifier</key><string>dev.pj.atoll</string>
+  <key>CFBundleName</key><string>Atoll</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

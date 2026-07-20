@@ -16,10 +16,10 @@ jobs:
         run: VERSION="${GITHUB_REF_NAME#v}" ./build.sh --universal
       - name: Zip
         run: |
-          ditto -c -k --keepParent "Claude Island.app" "ClaudeIsland-${GITHUB_REF_NAME}.zip"
-          # stable-named copy so install.sh can use /releases/latest/download/ClaudeIsland.zip
-          cp "ClaudeIsland-${GITHUB_REF_NAME}.zip" ClaudeIsland.zip
+          ditto -c -k --keepParent "Atoll.app" "Atoll-${GITHUB_REF_NAME}.zip"
+          # stable-named copy so install.sh can use /releases/latest/download/Atoll.zip
+          cp "Atoll-${GITHUB_REF_NAME}.zip" Atoll.zip
       - name: Create release
-        run: gh release create "$GITHUB_REF_NAME" "ClaudeIsland-${GITHUB_REF_NAME}.zip" ClaudeIsland.zip --title "Claude Island $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" "Atoll-${GITHUB_REF_NAME}.zip" Atoll.zip --title "Atoll $GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

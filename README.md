@@ -1,13 +1,37 @@
-# Claude Island
+# Atoll
 
 Dynamic-island-style notch app for macOS: hover the notch (or hit the hotkey)
-and it expands into an embedded `claude agents` terminal (FleetView) to manage
-all your Claude Code sessions.
+and it expands into a tabbed workspace that's always with you — Claude Code
+FleetView, herdr, a scratchpad, a shell, or any terminal command you configure.
 
 - Collapsed: black pill under the notch.
-- Hover or hotkey (default ⌃⌥ Space): expands into the terminal.
+- Hover or hotkey (default ⌃⌥ Space): expands into the selected tab.
+- Tabs: each is a terminal running a command of your choice (processes keep
+  running while collapsed or on another tab), or a native notes scratchpad.
 - Right-click: auto-focus toggle, launch directory for new sessions,
-  hotkey preset, quit.
+  hotkey preset, edit tabs, quit.
+
+> Formerly **Claude Island** (a single embedded `claude agents` terminal).
+> Atoll = a ring of many islands.
+
+## Tabs
+
+Tabs live in `~/.config/atoll/tabs.json` (created with defaults on first
+launch; right-click → "Edit Tabs…" opens it; edits are picked up on the next
+expand). Each entry is a terminal command, or `"type": "notes"` for the
+scratchpad (autosaved to `~/.config/atoll/notes.md`):
+
+```json
+[
+  { "name": "Fleet", "command": "~/.local/bin/claude agents" },
+  { "name": "herdr", "command": "herdr" },
+  { "name": "Notes", "type": "notes" },
+  { "name": "Shell" }
+]
+```
+
+An entry without `command` opens a plain login shell. Commands run via
+`zsh -lc` in the configured launch directory, so anything on your PATH works.
 
 ## Install
 
@@ -16,7 +40,8 @@ curl -fsSL https://raw.githubusercontent.com/pjoachims/claude-island/main/instal
 ```
 
 Downloads the latest [release](https://github.com/pjoachims/claude-island/releases)
-into `/Applications` and launches it.
+into `/Applications` and launches it (replacing an old Claude Island.app if
+present; prefs carry over).
 
 If you download the zip in a browser instead, macOS will block the app ("Apple
 could not verify...") because it's ad-hoc signed, not notarized. Either use the
@@ -28,14 +53,14 @@ to System Settings → Privacy & Security → "Open Anyway".
 Requires Xcode 15+ / Swift 5.9 (macOS 14+).
 
 ```sh
-./build.sh          # -> Claude Island.app (also syncs /Applications copy)
-open "Claude Island.app"
+./build.sh          # -> Atoll.app (also syncs /Applications copy)
+open "Atoll.app"
 ```
 
-Launch at login: System Settings → General → Login Items → add Claude Island.app.
+Launch at login: System Settings → General → Login Items → add Atoll.app.
 
 ## Uninstall
 
-Quit the app, delete Claude Island.app. If you installed a pre-0.3 version:
-remove the `claude-island` hook entries from `~/.claude/settings.json` and
-`rm -rf ~/.claude/island`.
+Quit the app, delete Atoll.app, `rm -rf ~/.config/atoll`. If you installed a
+pre-0.3 Claude Island: remove the `claude-island` hook entries from
+`~/.claude/settings.json` and `rm -rf ~/.claude/island`.

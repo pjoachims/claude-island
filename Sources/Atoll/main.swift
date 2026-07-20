@@ -22,11 +22,57 @@ let hotKeyPresets: [HotKeyPreset] = [
     .init(id: "off", label: "Off", keyCode: 0, mods: 0),
 ]
 
+// MARK: - Tabs config
+
+// A tab is either a terminal running `command` (empty -> plain shell) or,
+// with type "notes", a native scratchpad persisted to notes.md.
+struct TabSpec: Codable, Equatable {
+    var name: String
+    var command: String?
+    var type: String?
+    var isNotes: Bool { type == "notes" }
+}
+
+enum Config {
+    static let dir = NSHomeDirectory() + "/.config/atoll"
+    static let tabsFile = dir + "/tabs.json"
+    static let notesFile = dir + "/notes.md"
+
+    static let defaultTabs: [TabSpec] = [
+        .init(name: "Fleet", command: "~/.local/bin/claude agents", type: nil),
+        .init(name: "herdr", command: "herdr", type: nil),
+        .init(name: "Notes", command: nil, type: "notes"),
+        .init(name: "Shell", command: nil, type: nil),
+    ]
+
+    static func loadTabs() -> [TabSpec] {
+        guard let data = FileManager.default.contents(atPath: tabsFile),
+              let tabs = try? JSONDecoder().decode([TabSpec].self, from: data),
+              !tabs.isEmpty
+        else { return defaultTabs }
+        return tabs
+    }
+
+    // materialize the default config so "Edit Tabs…" has a file to open
+    static func writeDefaultTabsIfMissing() {
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        guard !fm.fileExists(atPath: tabsFile) else { return }
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        try? (try? enc.encode(defaultTabs))?.write(to: URL(fileURLWithPath: tabsFile))
+    }
+}
+
 // MARK: - Model
 
 final class Store: ObservableObject {
     @Published var expanded = false
     @Published var resizing = false // drag in progress: show bare black box
+    @Published var tabs: [TabSpec]
+    @Published var selected: String {
+        didSet { UserDefaults.standard.set(selected, forKey: "selectedTab") }
+    }
     @Published var autoFocus: Bool = UserDefaults.standard.object(forKey: "autoFocus") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoFocus, forKey: "autoFocus") }
     }
@@ -37,7 +83,7 @@ final class Store: ObservableObject {
         ?? NSHomeDirectory() + "/Documents/git" {
         didSet { UserDefaults.standard.set(launchDir, forKey: "launchDir") }
     }
-    // user-dragged terminal size; panel chrome is added around it
+    // user-dragged pane size; panel chrome is added around it
     @Published var termW: CGFloat = UserDefaults.standard.object(forKey: "termW") as? CGFloat ?? 556 {
         didSet { UserDefaults.standard.set(termW, forKey: "termW") }
     }
@@ -54,9 +100,28 @@ final class Store: ObservableObject {
             return fm.fileExists(atPath: p + "/.git") ? p : nil
         }
     }()
+
+    init() {
+        let t = Config.loadTabs()
+        tabs = t
+        let saved = UserDefaults.standard.string(forKey: "selectedTab")
+        selected = t.first { $0.name == saved }?.name ?? t[0].name
+    }
+
+    var selectedTab: TabSpec { tabs.first { $0.name == selected } ?? tabs[0] }
+
+    // pick up edits to tabs.json (called on each expand); panes of removed tabs die
+    func reloadTabs() {
+        let new = Config.loadTabs()
+        guard new != tabs else { return }
+        let removed = tabs.map(\.name).filter { n in !new.contains { $0.name == n } }
+        tabs = new
+        removed.forEach { PaneHost.shared.shutdown($0) }
+        if !new.contains(where: { $0.name == selected }) { selected = new[0].name }
+    }
 }
 
-// MARK: - Embedded `claude agents` terminal
+// MARK: - Embedded terminal panes
 
 final class IslandTerminalView: LocalProcessTerminalView {
     // accessory app has no Edit menu, so ⌘V never reaches paste(_:) on its own
@@ -87,13 +152,15 @@ final class IslandTerminalView: LocalProcessTerminalView {
     }
 }
 
-final class TermHost: NSObject, LocalProcessTerminalViewDelegate {
-    static let shared = TermHost()
-    private(set) var view: LocalProcessTerminalView?
+// One live terminal per tab, spawned on first use and kept running across
+// tab switches; only the selected one is attached to the view hierarchy.
+final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
+    static let shared = PaneHost()
+    private(set) var terms: [String: LocalProcessTerminalView] = [:]
 
-    func terminal() -> LocalProcessTerminalView {
-        if let v = view { return v }
-        // boot at the persisted size so the TUI lays out right before first expand
+    func terminal(for tab: TabSpec) -> LocalProcessTerminalView {
+        if let v = terms[tab.name] { return v }
+        // boot at the persisted size so TUIs lay out right before first expand
         let w = UserDefaults.standard.object(forKey: "termW") as? CGFloat ?? 556
         let h = UserDefaults.standard.object(forKey: "termH") as? CGFloat ?? 440
         let t = IslandTerminalView(frame: NSRect(x: 0, y: 0, width: w, height: h))
@@ -105,31 +172,60 @@ final class TermHost: NSObject, LocalProcessTerminalViewDelegate {
         env["COLORTERM"] = "truecolor"
         let cwd = UserDefaults.standard.string(forKey: "launchDir")
             ?? NSHomeDirectory() + "/Documents/git"
+        let cmd = (tab.command?.isEmpty == false) ? tab.command! : "zsh -il"
         t.startProcess(
             executable: "/bin/zsh",
-            args: ["-lc", "cd '\(cwd)' && exec ~/.local/bin/claude agents"],
+            args: ["-lc", "cd '\(cwd)' && exec \(cmd)"],
             environment: env.map { "\($0.key)=\($0.value)" },
             execName: nil)
-        view = t
+        terms[tab.name] = t
         return t
     }
 
-    func shutdown() {
-        // claude agents is a singleton TUI; an orphan blocks the next launch
-        if let v = view { kill(v.process.shellPid, SIGHUP) }
-        view = nil
+    func shutdown(_ name: String) {
+        // TUIs like `claude agents` are singletons; an orphan blocks the next launch
+        if let v = terms.removeValue(forKey: name) { kill(v.process.shellPid, SIGHUP) }
     }
 
-    // respawn on next expand if the TUI exits
-    func processTerminated(source: TerminalView, exitCode: Int32?) { view = nil }
+    func shutdownAll() { Array(terms.keys).forEach { shutdown($0) } }
+
+    // respawn on next attach if the process exits
+    func processTerminated(source: TerminalView, exitCode: Int32?) {
+        if let k = terms.first(where: { $0.value === source })?.key {
+            terms.removeValue(forKey: k)
+        }
+    }
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
     func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 }
 
 struct TerminalPane: NSViewRepresentable {
-    func makeNSView(context: Context) -> LocalProcessTerminalView { TermHost.shared.terminal() }
+    let tab: TabSpec
+    func makeNSView(context: Context) -> LocalProcessTerminalView { PaneHost.shared.terminal(for: tab) }
     func updateNSView(_ view: LocalProcessTerminalView, context: Context) {}
+}
+
+// MARK: - Notes pane
+
+struct NotesPane: View {
+    @ObservedObject var store: Store
+    @State private var text = (try? String(contentsOfFile: Config.notesFile, encoding: .utf8)) ?? ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextEditor(text: $text)
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundStyle(.white)
+            .scrollContentBackground(.hidden)
+            .background(Color.black)
+            .focused($focused)
+            .onChange(of: text) { _, t in
+                try? t.write(toFile: Config.notesFile, atomically: true, encoding: .utf8)
+            }
+            .onChange(of: store.expanded) { _, e in if e { focused = true } }
+            .onAppear { if store.expanded { focused = true } }
+    }
 }
 
 // MARK: - Views
@@ -151,12 +247,14 @@ struct IslandView: View {
             .overlay(alignment: .top) {
                 // always attached at the chosen size so the pty never sees pill-sized
                 // resizes (they made the TUI reflow to ~40 cols and stick there)
-                TerminalPane()
-                    .id(store.launchDir) // dir change -> fresh terminal + TUI
-                    .frame(width: store.termW, height: store.termH)
-                    .padding(.top, notchH + 8)
-                    .opacity(store.expanded && !store.resizing ? 1 : 0)
-                    .allowsHitTesting(store.expanded && !store.resizing)
+                VStack(spacing: 6) {
+                    tabBar
+                    pane
+                        .frame(width: store.termW, height: store.termH)
+                }
+                .padding(.top, notchH + 8)
+                .opacity(store.expanded && !store.resizing ? 1 : 0)
+                .allowsHitTesting(store.expanded && !store.resizing)
             }
             .overlay(alignment: .bottomTrailing) {
                 if store.expanded { resizeGrip }
@@ -176,8 +274,40 @@ struct IslandView: View {
                         Text(p.label).tag(p.id)
                     }
                 }
-                Button("Quit Claude Island") { NSApp.terminate(nil) }
+                Button("Edit Tabs…") {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: Config.tabsFile))
+                }
+                Button("Quit Atoll") { NSApp.terminate(nil) }
             }
+    }
+
+    @ViewBuilder var pane: some View {
+        let tab = store.selectedTab
+        if tab.isNotes {
+            NotesPane(store: store).id(tab.name)
+        } else {
+            // dir change -> fresh terminal + process
+            TerminalPane(tab: tab).id(tab.name + "|" + store.launchDir)
+        }
+    }
+
+    var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(store.tabs, id: \.name) { tab in
+                Button { store.selected = tab.name } label: {
+                    Text(tab.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(store.selected == tab.name ? Color.white : Color.gray)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 3)
+                        .background(
+                            store.selected == tab.name ? Color.white.opacity(0.15) : Color.clear,
+                            in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(height: 22)
     }
 
     // drag to resize the expanded island; AppDelegate tracks the mouse in screen
@@ -224,6 +354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return 160
     }
+    // tab bar (22) + gap (6) between the notch padding and the pane
+    let tabBarH: CGFloat = 28
 
     func applicationDidFinishLaunching(_ note: Notification) {
         panel = IslandPanel(
@@ -246,7 +378,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.sizingOptions = [] // never let SwiftUI intrinsic size fight setFrame
         panel.contentView = hosting
-        _ = TermHost.shared.terminal() // boot the TUI before the first expand
+        // boot the selected tab's process before the first expand
+        if !store.selectedTab.isNotes { _ = PaneHost.shared.terminal(for: store.selectedTab) }
         applyHotKey()
         store.$hotkey
             .dropFirst()
@@ -254,10 +387,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.applyHotKey() }
             .store(in: &bag)
 
-        // kill the old TUI before SwiftUI (.id change) attaches a fresh one
+        // kill the old processes before SwiftUI (.id change) attaches fresh ones
         store.$launchDir
             .dropFirst()
-            .sink { _ in TermHost.shared.shutdown() }
+            .sink { _ in PaneHost.shared.shutdownAll() }
+            .store(in: &bag)
+
+        // switching tabs while expanded moves the keyboard to the new pane
+        store.$selected
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.store.expanded else { return }
+                self.focusPrompt()
+            }
             .store(in: &bag)
         setExpanded(false)
         panel.orderFrontRegardless()
@@ -267,7 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return e
         }
 
-        // collapse when keyboard focus leaves the embedded terminal (click in another app)
+        // collapse when keyboard focus leaves the embedded pane (click in another app)
         NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
         ) { [weak self] _ in
@@ -279,7 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var typedSinceExpand = false
 
     func applicationWillTerminate(_ notification: Notification) {
-        TermHost.shared.shutdown()
+        PaneHost.shared.shutdownAll()
     }
 
     func hoverChanged(_ h: Bool) {
@@ -301,7 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if self.dragStartSize != nil { return } // never collapse mid-resize
             if self.panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation) { return }
-            // pinned only when the user actually typed into the terminal
+            // pinned only when the user actually typed into the pane
             if self.panel.isKeyWindow && self.typedSinceExpand { return }
             self.collapseTimer?.invalidate()
             self.collapseTimer = nil
@@ -341,7 +484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dragStartMouse == nil {
             dragStartMouse = NSEvent.mouseLocation
             dragStartSize = CGSize(width: store.termW, height: store.termH)
-            store.resizing = true // hide the terminal for the end-of-drag reflow
+            store.resizing = true // hide the pane for the end-of-drag reflow
             ghost.setFrame(panel.frame, display: false)
             ghost.orderFrontRegardless()
             panel.alphaValue = 0 // keeps key status, unlike orderOut
@@ -351,7 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // panel is centered on the notch, so the right edge only moves half of
         // any width change — double dx so the grip stays under the cursor
         let w = min(max(400, s0.width + (m.x - m0.x) * 2), sc.frame.width - 64)
-        let h = min(max(240, s0.height + (m0.y - m.y)), sc.frame.height * 0.8 - notchH - 24)
+        let h = min(max(240, s0.height + (m0.y - m.y)), sc.frame.height * 0.8 - notchH - tabBarH - 24)
         if ended {
             dragStartMouse = nil
             dragStartSize = nil
@@ -367,7 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let pw = max(notchW + 40, w + 24)
-        let ph = notchH + 8 + h + 16
+        let ph = notchH + 8 + tabBarH + h + 16
         ghost.setFrame(
             NSRect(x: sc.frame.midX - pw / 2, y: sc.frame.maxY - ph, width: pw, height: ph),
             display: true)
@@ -375,6 +518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setExpanded(_ e: Bool) {
         let wasExpanded = store.expanded
+        if e && !wasExpanded { store.reloadTabs() }
         store.expanded = e
         // hand the keyboard back to whatever app had it before auto-focus
         if !e, panel.isKeyWindow { panel.orderOut(nil) }
@@ -383,7 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let h: CGFloat
         if e {
             w = max(notchW + 40, store.termW + 24)
-            h = min(notchH + 8 + store.termH + 16, sc.frame.height * 0.8)
+            h = min(notchH + 8 + tabBarH + store.termH + 16, sc.frame.height * 0.8)
         } else {
             w = notchW + 16
             h = (notchH > 0 ? notchH : 22) + 18
@@ -405,12 +549,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // cursor straight into the FleetView prompt — type immediately
+    // cursor straight into the selected pane — type immediately
     func focusPrompt() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self, self.store.expanded else { return }
             self.panel.makeKey()
-            if let t = TermHost.shared.view { self.panel.makeFirstResponder(t) }
+            // notes pane focuses itself via @FocusState once the panel is key
+            if !self.store.selectedTab.isNotes,
+               let t = PaneHost.shared.terms[self.store.selected] {
+                self.panel.makeFirstResponder(t)
+            }
         }
     }
 
@@ -465,6 +613,16 @@ signal(SIGTERM, SIG_IGN)
 let sigTerm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 sigTerm.setEventHandler { NSApp.terminate(nil) }
 sigTerm.resume()
+
+Config.writeDefaultTabsIfMissing()
+
+// one-time migration of prefs from the Claude Island days
+if UserDefaults.standard.object(forKey: "termW") == nil,
+   let old = UserDefaults(suiteName: "dev.pj.claude-island") {
+    for k in ["autoFocus", "hotkey", "launchDir", "termW", "termH"] {
+        if let v = old.object(forKey: k) { UserDefaults.standard.set(v, forKey: k) }
+    }
+}
 
 let app = NSApplication.shared
 let delegate = AppDelegate()

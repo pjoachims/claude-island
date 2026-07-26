@@ -1,3 +1,5 @@
+<img src="scripts/icon_1024.png" width="128" alt="Atoll icon">
+
 # Atoll
 
 Dynamic-island-style notch app for macOS: hover the notch (or hit the hotkey)

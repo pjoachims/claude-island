@@ -167,11 +167,16 @@ final class Store: ObservableObject {
 // MARK: - Embedded terminal panes
 
 final class IslandTerminalView: LocalProcessTerminalView {
-    // accessory app has no Edit menu, so ⌘V never reaches paste(_:) on its own
+    // accessory app has no Edit menu, so ⌘V/⌘+/⌘- never reach their actions on their own
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "v" {
-            paste(self)
-            return true
+        if event.modifierFlags.contains(.command) {
+            switch event.charactersIgnoringModifiers {
+            case "v": paste(self); return true
+            case "+", "=": PaneHost.shared.bumpFont(+1); return true
+            case "-": PaneHost.shared.bumpFont(-1); return true
+            case "0": PaneHost.shared.bumpFont(0); return true
+            default: break
+            }
         }
         return super.performKeyEquivalent(with: event)
     }
@@ -226,6 +231,17 @@ final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
     static let shared = PaneHost()
     private(set) var terms: [String: LocalProcessTerminalView] = [:]
 
+    var fontSize: CGFloat = UserDefaults.standard.object(forKey: "fontSize") as? CGFloat ?? 10
+
+    // ⌘+/⌘-/⌘0 zoom for every pane; delta 0 resets
+    func bumpFont(_ delta: CGFloat) {
+        fontSize = delta == 0 ? 10 : min(max(fontSize + delta, 7), 24)
+        UserDefaults.standard.set(fontSize, forKey: "fontSize")
+        for t in terms.values {
+            t.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        }
+    }
+
     func terminal(for tab: TabSpec) -> LocalProcessTerminalView {
         if let v = terms[tab.name] { return v }
         // boot at the persisted size so TUIs lay out right before first expand
@@ -233,9 +249,12 @@ final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
         let h = UserDefaults.standard.object(forKey: "termH") as? CGFloat ?? 440
         let t = IslandTerminalView(frame: NSRect(x: 0, y: 0, width: w, height: h))
         t.processDelegate = self
-        t.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        t.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         t.nativeBackgroundColor = .black
         var env = ProcessInfo.processInfo.environment
+        // `open` from a herdr pane leaks HERDR_* into the app; panes would then
+        // look like nested herdr sessions
+        for k in env.keys where k.hasPrefix("HERDR_") { env.removeValue(forKey: k) }
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         let cwd = UserDefaults.standard.string(forKey: "launchDir")
@@ -723,7 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             h = min(notchH + 8 + tabBarH + store.termH + 16, sc.frame.height * 0.8)
         } else {
             w = notchW + 16
-            h = (notchH > 0 ? notchH : 22) + 18
+            h = notchH > 0 ? notchH : 22
         }
         let f = NSRect(
             x: sc.frame.midX - w / 2,

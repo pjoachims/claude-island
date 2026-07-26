@@ -40,10 +40,10 @@ configured launch directory, so anything on your PATH works — e.g.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pjoachims/claude-island/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pjoachims/atoll/main/install.sh | sh
 ```
 
-Downloads the latest [release](https://github.com/pjoachims/claude-island/releases)
+Downloads the latest [release](https://github.com/pjoachims/atoll/releases)
 into `/Applications` and launches it (replacing an old Claude Island.app if
 present; prefs carry over).
 

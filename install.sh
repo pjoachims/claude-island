@@ -3,7 +3,7 @@
 # curl downloads don't get the macOS quarantine flag, so Gatekeeper
 # won't block the (ad-hoc signed) app the way a browser download would.
 set -e
-ZIP_URL="https://github.com/pjoachims/claude-island/releases/latest/download/Atoll.zip"
+ZIP_URL="https://github.com/pjoachims/atoll/releases/latest/download/Atoll.zip"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 

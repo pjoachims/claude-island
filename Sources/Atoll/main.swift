@@ -227,18 +227,28 @@ final class IslandTerminalView: LocalProcessTerminalView {
 
 // One live terminal per tab, spawned on first use and kept running across
 // tab switches; only the selected one is attached to the view hierarchy.
+// macOS Terminal dark-mode blue-gray, sampled from the real thing
+let terminalBG = NSColor(srgbRed: 34/255, green: 39/255, blue: 49/255, alpha: 1)
+
 final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
     static let shared = PaneHost()
     private(set) var terms: [String: LocalProcessTerminalView] = [:]
 
     var fontSize: CGFloat = UserDefaults.standard.object(forKey: "fontSize") as? CGFloat ?? 10
 
+    // SF Mono has no Nerd Font glyphs (herdr's sidebar icons render as "?"
+    // boxes); prefer an installed Nerd Font like Terminal.app does
+    func paneFont(_ size: CGFloat) -> NSFont {
+        NSFont(name: "JetBrainsMonoNL Nerd Font", size: size)
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     // ⌘+/⌘-/⌘0 zoom for every pane; delta 0 resets
     func bumpFont(_ delta: CGFloat) {
         fontSize = delta == 0 ? 10 : min(max(fontSize + delta, 7), 24)
         UserDefaults.standard.set(fontSize, forKey: "fontSize")
         for t in terms.values {
-            t.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            t.font = paneFont(fontSize)
         }
     }
 
@@ -249,8 +259,8 @@ final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
         let h = UserDefaults.standard.object(forKey: "termH") as? CGFloat ?? 440
         let t = IslandTerminalView(frame: NSRect(x: 0, y: 0, width: w, height: h))
         t.processDelegate = self
-        t.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        t.nativeBackgroundColor = .black
+        t.font = paneFont(fontSize)
+        t.nativeBackgroundColor = terminalBG
         var env = ProcessInfo.processInfo.environment
         // `open` from a herdr pane leaks HERDR_* into the app; panes would then
         // look like nested herdr sessions
@@ -305,7 +315,7 @@ struct NotesPane: View {
             .font(.system(size: 12, design: .monospaced))
             .foregroundStyle(.white)
             .scrollContentBackground(.hidden)
-            .background(Color.black)
+            .background(Color(nsColor: terminalBG))
             .focused($focused)
             .onChange(of: text) { _, t in
                 try? t.write(toFile: Config.notesFile, atomically: true, encoding: .utf8)
@@ -333,7 +343,7 @@ struct IslandView: View {
         UnevenRoundedRectangle(
             bottomLeadingRadius: store.expanded ? 14 : 18,
             bottomTrailingRadius: store.expanded ? 14 : 18)
-            .fill(.black)
+            .fill(store.expanded ? Color(nsColor: terminalBG) : Color.black)
             .overlay(alignment: .top) {
                 // always attached at the chosen size so the pty never sees pill-sized
                 // resizes (they made the TUI reflow to ~40 cols and stick there)
@@ -684,7 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         g.ignoresMouseEvents = true
         let v = NSView()
         v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.black.cgColor
+        v.layer?.backgroundColor = terminalBG.cgColor
         v.layer?.cornerRadius = 14
         v.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         g.contentView = v

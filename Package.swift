@@ -9,5 +9,8 @@ let package = Package(
     ],
     targets: [
         .executableTarget(name: "Atoll", dependencies: ["SwiftTerm"], path: "Sources/Atoll"),
+        // NB: path must not case-fold onto Sources/Atoll (APFS is
+        // case-insensitive; "Sources/atoll" silently overwrote it once)
+        .executableTarget(name: "atoll-cli", path: "Sources/cli"),
     ]
 )

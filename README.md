@@ -8,10 +8,13 @@ FleetView, a scratchpad, a shell, or any terminal command you configure.
 
 - Collapsed: black pill under the notch.
 - Hover or hotkey (default ⌃⌥ Space): expands into the selected tab.
+- Startup: nothing runs until you expand. Optionally pick "First Tab" on
+  launch and/or pre-warm panes (right-click menu) for an instant island.
 - Tabs: each is a terminal running a command of your choice (processes keep
   running while collapsed or on another tab), or a native notes scratchpad.
 - Right-click: auto-focus toggle, launch directory for new sessions,
-  hotkey preset, edit tabs, quit.
+  hotkey preset, theme (tarmac / bubblegum / phosphor / pool), sharp-corner
+  toggle, edit tabs, quit.
 
 > Formerly **Claude Island** (a single embedded `claude agents` terminal).
 > Atoll = a ring of many islands.
@@ -32,10 +35,41 @@ scratchpad (autosaved to `~/.config/atoll/notes.md`):
 
 Add your own with the "+" button: one click on a suggested tool found on
 your PATH (herdr, lazygit, btop, …) or a Shell/Notes pane, or type a name
-and any command. Right-click a tab to remove it. An entry without `command` opens a
+and any command. Right-click a tab to remove it or flip it between terminal
+and widget. An entry without `command` opens a
 plain login shell (`{ "name": "Shell" }`). Commands run via `zsh -lc` in the
 configured launch directory, so anything on your PATH works — e.g.
 `{ "name": "herdr", "command": "herdr" }`.
+
+### Build-your-own islands
+
+Beyond terminals, a tab can be:
+
+- **Widget** — polled command output rendered as text (no pty):
+  ```json
+  { "name": "git", "type": "widget", "command": "git status --short --branch", "refresh": 10 }
+  ```
+  `refresh` is seconds (default 5). Or right-click any command tab →
+  "Use as Widget" to convert it in place.
+- **Web pane** — an embedded browser pinned to a URL; logins survive tab
+  switches:
+  ```json
+  { "name": "CI", "type": "web", "url": "https://github.com/notifications" }
+  ```
+
+### atollctl — script the island
+
+The app listens on a local socket (`~/.config/atoll/atoll.sock`) so anything
+can drive it. The client ships inside the app bundle:
+
+```sh
+/Applications/Atoll.app/Contents/MacOS/atollctl toggle
+/Applications/Atoll.app/Contents/MacOS/atollctl select ci
+/Applications/Atoll.app/Contents/MacOS/atollctl flash "✓ build passed"
+/Applications/Atoll.app/Contents/MacOS/atollctl status   # expanded/selected/tabs/live
+```
+
+Handy alias: `alias atoll='/Applications/Atoll.app/Contents/MacOS/atollctl'`.
 
 ## Install
 

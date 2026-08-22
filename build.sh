@@ -20,6 +20,9 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Atoll"
+# scriptable control binary; NOT "atoll" — APFS is case-insensitive and it
+# would clobber the Atoll app binary
+cp "$(dirname "$BIN")/atoll-cli" "$APP/Contents/MacOS/atollctl"
 cp AppIcon.icns "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

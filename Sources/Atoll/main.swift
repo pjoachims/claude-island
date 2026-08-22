@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 import Combine
 import SwiftTerm
 import SwiftUI
+import WebKit
 
 // MARK: - Hotkey presets
 
@@ -22,15 +23,60 @@ let hotKeyPresets: [HotKeyPreset] = [
     .init(id: "off", label: "Off", keyCode: 0, mods: 0),
 ]
 
+// MARK: - Theme
+
+struct Theme {
+    let id: String
+    let name: String
+    let ink: NSColor     // chrome + terminal background
+    let paper: NSColor   // primary text
+    let dim: NSColor     // secondary text
+    let accent: NSColor  // active tab, cursor, drop shadows
+}
+
+let themes: [Theme] = [
+    .init(id: "tarmac", name: "tarmac",
+          ink: NSColor(srgbRed: 0.071, green: 0.075, blue: 0.090, alpha: 1),
+          paper: NSColor(srgbRed: 0.910, green: 0.902, blue: 0.878, alpha: 1),
+          dim: NSColor(srgbRed: 0.478, green: 0.494, blue: 0.541, alpha: 1),
+          accent: NSColor(srgbRed: 1.000, green: 0.706, blue: 0.294, alpha: 1)),
+    .init(id: "bubblegum", name: "bubblegum",
+          ink: NSColor(srgbRed: 0.098, green: 0.063, blue: 0.086, alpha: 1),
+          paper: NSColor(srgbRed: 0.949, green: 0.894, blue: 0.922, alpha: 1),
+          dim: NSColor(srgbRed: 0.502, green: 0.404, blue: 0.467, alpha: 1),
+          accent: NSColor(srgbRed: 1.000, green: 0.361, blue: 0.596, alpha: 1)),
+    .init(id: "phosphor", name: "phosphor",
+          ink: NSColor(srgbRed: 0.020, green: 0.039, blue: 0.027, alpha: 1),
+          paper: NSColor(srgbRed: 0.847, green: 0.910, blue: 0.851, alpha: 1),
+          dim: NSColor(srgbRed: 0.290, green: 0.376, blue: 0.310, alpha: 1),
+          accent: NSColor(srgbRed: 0.231, green: 1.000, blue: 0.486, alpha: 1)),
+    .init(id: "pool", name: "pool",
+          ink: NSColor(srgbRed: 0.039, green: 0.071, blue: 0.094, alpha: 1),
+          paper: NSColor(srgbRed: 0.862, green: 0.910, blue: 0.925, alpha: 1),
+          dim: NSColor(srgbRed: 0.357, green: 0.443, blue: 0.494, alpha: 1),
+          accent: NSColor(srgbRed: 0.275, green: 0.847, blue: 1.000, alpha: 1)),
+]
+
+func currentTheme() -> Theme {
+    let id = UserDefaults.standard.string(forKey: "theme") ?? "tarmac"
+    return themes.first { $0.id == id } ?? themes[0]
+}
+
 // MARK: - Tabs config
 
-// A tab is either a terminal running `command` (empty -> plain shell) or,
-// with type "notes", a native scratchpad persisted to notes.md.
+// A tab is a terminal running `command` (empty -> plain shell), or one of:
+//   type "notes"  native scratchpad persisted to notes.md
+//   type "widget" polled `command` output rendered as text, every `refresh`s
+//   type "web"    WKWebView pinned to `url` (session survives tab switches)
 struct TabSpec: Codable, Equatable {
     var name: String
     var command: String?
     var type: String?
+    var url: String?
+    var refresh: Int?
     var isNotes: Bool { type == "notes" }
+    var isWidget: Bool { type == "widget" }
+    var isWeb: Bool { type == "web" }
 }
 
 enum Config {
@@ -84,6 +130,39 @@ final class Store: ObservableObject {
         ?? NSHomeDirectory() + "/Documents/git" {
         didSet { UserDefaults.standard.set(launchDir, forKey: "launchDir") }
     }
+    @Published var themeID: String = UserDefaults.standard.string(forKey: "theme") ?? "tarmac" {
+        didSet { UserDefaults.standard.set(themeID, forKey: "theme") }
+    }
+    var theme: Theme { themes.first { $0.id == themeID } ?? themes[0] }
+    // brutalist slabs vs soft corners; pill/panel/chip radii follow
+    @Published var sharpCorners: Bool = UserDefaults.standard.object(forKey: "sharpCorners") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(sharpCorners, forKey: "sharpCorners") }
+    }
+    var pillRadius: CGFloat { sharpCorners ? 4 : 18 }
+    var panelRadius: CGFloat { sharpCorners ? 2 : 14 }
+    var chipRadius: CGFloat { sharpCorners ? 1 : 8 }
+    // tabs with a live process (drives the activity dots on the collapsed pill)
+    @Published var livePanes: Set<String> = []
+    // transient message pushed over the atoll socket, shown on the pill
+    @Published var flash: String?
+    private var flashTimer: Timer?
+
+    func showFlash(_ msg: String) {
+        flash = msg
+        flashTimer?.invalidate()
+        flashTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: false) { [weak self] _ in
+            self?.flash = nil
+        }
+    }
+    // startup policy: which tab is selected on launch, and whether its process
+    // is spawned up front. Defaults touch nothing until the user expands.
+    @Published var startSelection: String =
+        UserDefaults.standard.string(forKey: "startSelection") ?? "last" {
+        didSet { UserDefaults.standard.set(startSelection, forKey: "startSelection") }
+    }
+    @Published var warmStart: Bool = UserDefaults.standard.object(forKey: "warmStart") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(warmStart, forKey: "warmStart") }
+    }
     // user-dragged pane size; panel chrome is added around it
     @Published var termW: CGFloat = UserDefaults.standard.object(forKey: "termW") as? CGFloat ?? 556 {
         didSet { UserDefaults.standard.set(termW, forKey: "termW") }
@@ -105,8 +184,15 @@ final class Store: ObservableObject {
     init() {
         let t = Config.loadTabs()
         tabs = t
-        let saved = UserDefaults.standard.string(forKey: "selectedTab")
-        selected = t.first { $0.name == saved }?.name ?? t[0].name
+        // "last" resumes where the user left off; "first" always opens tab 1
+        let sel = UserDefaults.standard.string(forKey: "startSelection") ?? "last"
+        if sel == "last",
+           let saved = UserDefaults.standard.string(forKey: "selectedTab"),
+           t.contains(where: { $0.name == saved }) {
+            selected = saved
+        } else {
+            selected = t[0].name
+        }
     }
 
     var selectedTab: TabSpec { tabs.first { $0.name == selected } ?? tabs[0] }
@@ -149,8 +235,22 @@ final class Store: ObservableObject {
         guard tabs.count > 1, let i = tabs.firstIndex(where: { $0.name == name }) else { return }
         tabs.remove(at: i)
         PaneHost.shared.shutdown(name)
+        WebHost.shared.shutdown(name)
         Config.save(tabs)
         if selected == name { selected = tabs[0].name }
+    }
+
+    // flip one tab between interactive terminal and polled widget, same command
+    func convertTab(_ tab: TabSpec) {
+        guard let i = tabs.firstIndex(where: { $0.name == tab.name }) else { return }
+        if tab.isWidget {
+            tabs[i].type = nil
+        } else {
+            PaneHost.shared.shutdown(tab.name)
+            tabs[i].type = "widget"
+            if tabs[i].refresh == nil { tabs[i].refresh = 5 }
+        }
+        Config.save(tabs)
     }
 
     // pick up edits to tabs.json (called on each expand); panes of removed tabs die
@@ -159,7 +259,10 @@ final class Store: ObservableObject {
         guard new != tabs else { return }
         let removed = tabs.map(\.name).filter { n in !new.contains { $0.name == n } }
         tabs = new
-        removed.forEach { PaneHost.shared.shutdown($0) }
+        removed.forEach {
+            PaneHost.shared.shutdown($0)
+            WebHost.shared.shutdown($0)
+        }
         if !new.contains(where: { $0.name == selected }) { selected = new[0].name }
     }
 }
@@ -227,12 +330,14 @@ final class IslandTerminalView: LocalProcessTerminalView {
 
 // One live terminal per tab, spawned on first use and kept running across
 // tab switches; only the selected one is attached to the view hierarchy.
-// macOS Terminal dark-mode blue-gray, sampled from the real thing
-let terminalBG = NSColor(srgbRed: 34/255, green: 39/255, blue: 49/255, alpha: 1)
+// Terminal panes share the theme ink so the island reads as one slab
+var terminalBG: NSColor = currentTheme().ink
 
 final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
     static let shared = PaneHost()
     private(set) var terms: [String: LocalProcessTerminalView] = [:]
+    // fired whenever the set of live panes changes (pill activity dots)
+    var onLiveChange: (() -> Void)?
 
     var fontSize: CGFloat = UserDefaults.standard.object(forKey: "fontSize") as? CGFloat ?? 10
 
@@ -250,6 +355,11 @@ final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
         for t in terms.values {
             t.font = paneFont(fontSize)
         }
+    }
+
+    // theme change: recolor live panes in place
+    func applyTheme(_ t: Theme) {
+        for term in terms.values { term.nativeBackgroundColor = t.ink }
     }
 
     func terminal(for tab: TabSpec) -> LocalProcessTerminalView {
@@ -276,12 +386,16 @@ final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
             environment: env.map { "\($0.key)=\($0.value)" },
             execName: nil)
         terms[tab.name] = t
+        onLiveChange?()
         return t
     }
 
     func shutdown(_ name: String) {
         // TUIs like `claude agents` are singletons; an orphan blocks the next launch
-        if let v = terms.removeValue(forKey: name) { kill(v.process.shellPid, SIGHUP) }
+        if let v = terms.removeValue(forKey: name) {
+            kill(v.process.shellPid, SIGHUP)
+            onLiveChange?()
+        }
     }
 
     func shutdownAll() { Array(terms.keys).forEach { shutdown($0) } }
@@ -290,6 +404,7 @@ final class PaneHost: NSObject, LocalProcessTerminalViewDelegate {
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         if let k = terms.first(where: { $0.value === source })?.key {
             terms.removeValue(forKey: k)
+            onLiveChange?()
         }
     }
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
@@ -308,21 +423,148 @@ struct TerminalPane: NSViewRepresentable {
 struct NotesPane: View {
     @ObservedObject var store: Store
     @State private var text = (try? String(contentsOfFile: Config.notesFile, encoding: .utf8)) ?? ""
+    @State private var savedFlash = false
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextEditor(text: $text)
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundStyle(.white)
-            .scrollContentBackground(.hidden)
-            .background(Color(nsColor: terminalBG))
-            .focused($focused)
-            .onChange(of: text) { _, t in
-                try? t.write(toFile: Config.notesFile, atomically: true, encoding: .utf8)
+        let t = store.theme
+        VStack(spacing: 0) {
+            TextEditor(text: $text)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color(nsColor: t.paper))
+                .scrollContentBackground(.hidden)
+                .background(Color(nsColor: t.ink))
+                .focused($focused)
+                .padding(.horizontal, 4)
+            Rectangle().fill(Color(nsColor: t.paper).opacity(0.14)).frame(height: 1)
+            HStack(spacing: 6) {
+                Text("-- notes.md · autosaves --")
+                Spacer()
+                Text("✓ saved")
+                    .foregroundStyle(Color(nsColor: t.accent))
+                    .opacity(savedFlash ? 1 : 0)
             }
-            .onChange(of: store.expanded) { _, e in if e { focused = true } }
-            .onAppear { if store.expanded { focused = true } }
+            .font(mono(9))
+            .foregroundStyle(Color(nsColor: t.dim))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+        }
+        .onChange(of: text) { _, newText in
+            try? newText.write(toFile: Config.notesFile, atomically: true, encoding: .utf8)
+            savedFlash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { savedFlash = false }
+        }
+        .onChange(of: store.expanded) { _, e in if e { focused = true } }
+        .onAppear { if store.expanded { focused = true } }
     }
+}
+
+// monospace chrome font; the island UI speaks terminal
+func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+    .system(size: size, weight: weight, design: .monospaced)
+}
+
+// MARK: - Widget pane
+
+// A widget is a command polled on an interval, its output shown as text.
+// No pty: cheap enough to keep several running as ambient islands
+// (git status, disk space, CI state via curl, ...).
+struct WidgetPane: View {
+    let tab: TabSpec
+    @State private var out = ""
+    @State private var ranAt = ""
+    // drops stale results if a tick lands while the previous run is still going
+    @State private var gen = 0
+
+    var body: some View {
+        let t = currentTheme()
+        let interval = max(1, tab.refresh ?? 5)
+        VStack(spacing: 0) {
+            ScrollView(.vertical) {
+                Text(out.isEmpty ? "-- waiting for first refresh --" : out)
+                    .font(mono(11))
+                    .foregroundStyle(Color(nsColor: t.paper))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .textSelection(.enabled)
+            }
+            Rectangle().fill(Color(nsColor: t.paper).opacity(0.14)).frame(height: 1)
+            HStack(spacing: 6) {
+                Text("-- \(tab.name.lowercased()) · every \(interval)s")
+                Spacer()
+                Text(ranAt)
+            }
+            .font(mono(9))
+            .foregroundStyle(Color(nsColor: t.dim))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+        }
+        .background(Color(nsColor: t.ink))
+        .onAppear { tick() }
+        .onChange(of: tab.command) { _, _ in tick() } // tabs.json edits re-run
+        .onReceive(Timer.publish(every: TimeInterval(interval), on: .main, in: .common).autoconnect()) { _ in
+            tick()
+        }
+    }
+
+    func tick() {
+        gen += 1
+        let g = gen
+        let cmd = (tab.command?.isEmpty == false) ? tab.command! : "echo 'set \"command\" in tabs.json'"
+        let cwd = UserDefaults.standard.string(forKey: "launchDir")
+            ?? NSHomeDirectory() + "/Documents/git"
+        DispatchQueue.global(qos: .utility).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-lc", "cd '\(cwd)' && exec \(cmd)"]
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = pipe
+            do { try p.run() } catch {
+                DispatchQueue.main.async { if g == self.gen { self.out = "\(error)" } }
+                return
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 30) { [weak p] in
+                if p?.isRunning == true { p?.terminate() } // don't let widgets hang forever
+            }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let s = String(data: data.prefix(64 * 1024), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                guard g == self.gen else { return }
+                self.out = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.ranAt = DateFormatter.localizedString(
+                    from: Date(), dateStyle: .none, timeStyle: .medium)
+            }
+        }
+    }
+}
+
+// MARK: - Web pane
+
+// One WKWebView per web tab, kept alive across tab switches so logins and
+// scroll position survive; created lazily on first expand like terminals
+final class WebHost {
+    static let shared = WebHost()
+    private(set) var webs: [String: WKWebView] = [:]
+
+    func web(for tab: TabSpec) -> WKWebView {
+        if let w = webs[tab.name] { return w }
+        let w = WKWebView(frame: .zero)
+        var s = tab.url ?? ""
+        if !s.isEmpty && !s.contains("://") { s = "https://" + s }
+        if let u = URL(string: s) { w.load(URLRequest(url: u)) }
+        webs[tab.name] = w
+        return w
+    }
+
+    func shutdown(_ name: String) { _ = webs.removeValue(forKey: name) }
+    func shutdownAll() { webs.removeAll() }
+}
+
+struct WebPane: NSViewRepresentable {
+    let tab: TabSpec
+    func makeNSView(context: Context) -> WKWebView { WebHost.shared.web(for: tab) }
+    func updateNSView(_ view: WKWebView, context: Context) {}
 }
 
 // MARK: - Views
@@ -337,13 +579,14 @@ struct IslandView: View {
     @FocusState private var nameFocus: Bool
 
     var body: some View {
+        let t = store.theme
         // overlays don't inflate layout: a fixed-size child in a ZStack made the
         // root bigger than the pill window, pushing bottom content (and the
         // rounded corners) outside the visible frame
         UnevenRoundedRectangle(
-            bottomLeadingRadius: store.expanded ? 14 : 18,
-            bottomTrailingRadius: store.expanded ? 14 : 18)
-            .fill(store.expanded ? Color(nsColor: terminalBG) : Color.black)
+            bottomLeadingRadius: store.expanded ? store.panelRadius : store.pillRadius,
+            bottomTrailingRadius: store.expanded ? store.panelRadius : store.pillRadius)
+            .fill(store.expanded ? Color(nsColor: t.ink) : Color.black)
             .overlay(alignment: .top) {
                 // always attached at the chosen size so the pty never sees pill-sized
                 // resizes (they made the TUI reflow to ~40 cols and stick there)
@@ -359,6 +602,7 @@ struct IslandView: View {
                 .opacity(store.expanded && !store.resizing ? 1 : 0)
                 .allowsHitTesting(store.expanded && !store.resizing)
             }
+            .overlay(alignment: .bottom) { if !store.expanded { pillDots } }
             .overlay(alignment: .bottomTrailing) {
                 if store.expanded { resizeGrip }
             }
@@ -377,6 +621,18 @@ struct IslandView: View {
                         Text(p.label).tag(p.id)
                     }
                 }
+                Divider()
+                Picker("On Launch, Show", selection: $store.startSelection) {
+                    Text("Last Used Tab").tag("last")
+                    Text("First Tab").tag("first")
+                }
+                Toggle("Pre-Warm Panes at Launch", isOn: $store.warmStart)
+                Divider()
+                Picker("Theme", selection: $store.themeID) {
+                    ForEach(themes, id: \.id) { th in Text(th.name).tag(th.id) }
+                }
+                Toggle("Sharp corners", isOn: $store.sharpCorners)
+                Divider()
                 Button("Edit Tabs…") {
                     NSWorkspace.shared.open(URL(fileURLWithPath: Config.tabsFile))
                 }
@@ -388,6 +644,18 @@ struct IslandView: View {
         let tab = store.selectedTab
         if tab.isNotes {
             NotesPane(store: store).id(tab.name)
+        } else if tab.isWidget {
+            WidgetPane(tab: tab).id(tab.name)
+        } else if tab.isWeb {
+            WebPane(tab: tab)
+                .id(tab.name)
+                .contextMenu {
+                    Button("Back") { WebHost.shared.webs[tab.name]?.goBack() }
+                    Button("Reload") { WebHost.shared.webs[tab.name]?.reload() }
+                    if let s = tab.url, let u = URL(string: s.contains("://") ? s : "https://" + s) {
+                        Button("Open in Browser") { NSWorkspace.shared.open(u) }
+                    }
+                }
         } else {
             // dir change -> fresh terminal + process
             TerminalPane(tab: tab).id(tab.name + "|" + store.launchDir)
@@ -395,87 +663,145 @@ struct IslandView: View {
     }
 
     var tabBar: some View {
-        HStack(spacing: 4) {
+        let t = store.theme
+        return HStack(spacing: 6) {
             ForEach(store.tabs, id: \.name) { tab in
+                let active = store.selected == tab.name
                 Button { store.selected = tab.name } label: {
-                    Text(tab.name)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(store.selected == tab.name ? Color.white : Color.gray)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 3)
-                        .background(
-                            store.selected == tab.name ? Color.white.opacity(0.15) : Color.clear,
-                            in: Capsule())
+                    HStack(spacing: 4) {
+                        Text(paneGlyph(tab))
+                        Text(tab.name)
+                        if active {
+                            BlinkCursor(color: SwiftUI.Color(nsColor: t.ink), size: 9)
+                        }
+                    }
+                    .font(mono(10, .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        active ? Color(nsColor: t.accent) : Color(nsColor: t.paper).opacity(0.07),
+                        in: RoundedRectangle(cornerRadius: store.chipRadius))
+                    .foregroundStyle(active ? Color(nsColor: t.ink) : Color(nsColor: t.dim))
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
                     Button("Remove \"\(tab.name)\"") { store.removeTab(tab.name) }
+                    // same command, no pty: turn a one-shot tool into a live island
+                    if !tab.isNotes && !tab.isWeb {
+                        Button(tab.isWidget ? "Use as Terminal" : "Use as Widget") {
+                            store.convertTab(tab)
+                        }
+                    }
                 }
             }
-            Button { store.addingTab.toggle() } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(store.addingTab ? Color.white : Color.gray)
+            Button {
+                withAnimation(.easeOut(duration: 0.12)) { store.addingTab.toggle() }
+            } label: {
+                Text("+")
+                    .font(mono(11, .bold))
+                    .foregroundStyle(store.addingTab ? Color(nsColor: t.accent) : Color(nsColor: t.dim))
                     .padding(.horizontal, 6)
-                    .padding(.vertical, 5)
             }
             .buttonStyle(.plain)
         }
         .frame(height: 22)
     }
 
+    // collapsed pill: one dot per live pane, accent for the selected tab,
+    // plus a blinking cursor so the slab feels alive. A CLI flash takes over.
+    var pillDots: some View {
+        Group {
+            if let f = store.flash {
+                Text(f)
+                    .font(mono(9, .bold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Color(nsColor: store.theme.accent),
+                        in: RoundedRectangle(cornerRadius: 3))
+                    .foregroundStyle(Color(nsColor: store.theme.ink))
+                    .lineLimit(1)
+            } else {
+                HStack(spacing: 4) {
+                    ForEach(store.tabs.filter { store.livePanes.contains($0.name) }, id: \.name) { tab in
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(tab.name == store.selected
+                                  ? Color(nsColor: store.theme.accent)
+                                  : Color(nsColor: store.theme.paper).opacity(0.35))
+                            .frame(width: 5, height: 5)
+                    }
+                    BlinkCursor(color: Color(nsColor: store.theme.accent), size: 7)
+                }
+            }
+        }
+        .padding(.bottom, notchH > 0 ? 5 : 6)
+    }
+
+    func paneGlyph(_ tab: TabSpec) -> String {
+        tab.isNotes ? "✎" : tab.isWidget ? "↻" : tab.isWeb ? "◎" : "❯"
+    }
+
     // + card: one-click chips for tools found on PATH, custom row below.
     // Drawn inside the panel — a popover would be its own window, the panel
     // would lose key status, and the collapse timer would fold the island.
     var addCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let t = store.theme
+        // one hair lighter than ink so the card reads against the slab
+        let card = Color(nsColor: t.ink.blended(withFraction: 0.045, of: .white) ?? t.ink)
+        return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("New tab")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
+                Text("new tab")
+                    .font(mono(11, .bold))
+                    .foregroundStyle(Color(nsColor: t.paper))
                 Spacer()
                 Button { cancelNewTab() } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Color.gray)
+                    Text("✕")
+                        .font(mono(10, .bold))
+                        .foregroundStyle(Color(nsColor: t.dim))
                 }
                 .buttonStyle(.plain)
             }
             if !suggestions.isEmpty {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], spacing: 6) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], spacing: 8) {
                     ForEach(suggestions, id: \.self) { s in
                         Button { addSuggestion(s) } label: {
                             Text(s)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.white)
+                                .font(mono(10))
                                 .padding(.vertical, 5)
                                 .frame(maxWidth: .infinity)
-                                .background(Color.white.opacity(0.1), in: Capsule())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(BrutalChip(corner: store.chipRadius))
                     }
                 }
+            } else {
+                Text("no tools found :(")
+                    .font(mono(10))
+                    .foregroundStyle(Color(nsColor: t.dim))
             }
             HStack(spacing: 8) {
-                TextField("Name", text: $newName)
+                TextField("name", text: $newName)
                     .frame(width: 76)
                     .focused($nameFocus)
                 TextField("command · empty = shell", text: $newCommand)
-                    .font(.system(size: 11, design: .monospaced))
-                Button("Add") { submitNewTab() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(canAdd ? Color.white : Color.gray.opacity(0.5))
+                Button("add") { submitNewTab() }
+                    .buttonStyle(BrutalChip(corner: store.chipRadius))
                     .disabled(!canAdd)
             }
             .textFieldStyle(.plain)
-            .font(.system(size: 11))
-            .foregroundStyle(.white)
+            .font(mono(11))
+            .foregroundStyle(Color(nsColor: t.paper))
         }
         .padding(12)
         .frame(width: 360)
-        .background(Color(white: 0.13), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.08)))
+        .background(
+            RoundedRectangle(cornerRadius: store.chipRadius + 2).fill(card))
+        .overlay(
+            RoundedRectangle(cornerRadius: store.chipRadius + 2)
+                .strokeBorder(Color(nsColor: t.paper), lineWidth: 1))
+        .background(
+            RoundedRectangle(cornerRadius: store.chipRadius + 2)
+                .fill(Color(nsColor: t.accent))
+                .offset(x: 4, y: 4))
         .onSubmit { submitNewTab() }
         .onExitCommand { cancelNewTab() }
         .onAppear {
@@ -521,15 +847,53 @@ struct IslandView: View {
     // drag to resize the expanded island; AppDelegate tracks the mouse in screen
     // coords (gesture translation is useless inside a live-resizing view)
     var resizeGrip: some View {
-        Image(systemName: "arrow.up.left.and.arrow.down.right")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(.gray.opacity(0.7))
+        Text("◢")
+            .font(mono(9, .bold))
+            .foregroundStyle(Color(nsColor: store.theme.dim))
             .padding(8)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in onResize(false) }
                     .onEnded { _ in onResize(true) })
+    }
+}
+
+// square chip with a 1px paper border and a hard accent drop-block;
+// pressing collapses the offset so the face lands on the shadow
+struct BrutalChip: ButtonStyle {
+    var corner: CGFloat
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        let t = currentTheme()
+        configuration.label
+            .foregroundStyle(Color(nsColor: t.paper).opacity(enabled ? 1 : 0.35))
+            .background(RoundedRectangle(cornerRadius: corner).fill(Color(nsColor: t.ink)))
+            .overlay(
+                RoundedRectangle(cornerRadius: corner)
+                    .strokeBorder(Color(nsColor: t.paper).opacity(enabled ? 1 : 0.35), lineWidth: 1))
+            .background(
+                RoundedRectangle(cornerRadius: corner)
+                    .fill(Color(nsColor: t.accent))
+                    .opacity(enabled ? 1 : 0.25)
+                    .offset(x: configuration.isPressed ? 0 : 2,
+                            y: configuration.isPressed ? 0 : 2))
+            .offset(y: configuration.isPressed ? 2 : 0)
+    }
+}
+
+// terminal cursor block that blinks on a fixed clock (no timers to manage)
+struct BlinkCursor: View {
+    var color: SwiftUI.Color
+    var size: CGFloat
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.1)) { ctx in
+            Text("▮")
+                .font(mono(size))
+                .foregroundStyle(color)
+                .opacity(ctx.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 1.1) < 0.65 ? 1 : 0.15)
+        }
     }
 }
 
@@ -586,14 +950,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hosting = FirstMouseHostingView(rootView: view)
         hosting.sizingOptions = [] // never let SwiftUI intrinsic size fight setFrame
         panel.contentView = hosting
-        // boot the selected tab's process before the first expand
-        if !store.selectedTab.isNotes { _ = PaneHost.shared.terminal(for: store.selectedTab) }
+        // opt-in warm start: boot the selected pane's process before the first
+        // expand. Default is cold: nothing spawns until the user expands.
+        if store.warmStart, !store.selectedTab.isNotes {
+            _ = PaneHost.shared.terminal(for: store.selectedTab)
+        }
         store.scanTools() // populate the + card's suggestions
+        PaneHost.shared.onLiveChange = { [weak self] in
+            // processTerminated can arrive off-main; @Published needs main
+            DispatchQueue.main.async {
+                self?.store.livePanes = Set(PaneHost.shared.terms.keys)
+            }
+        }
+        store.livePanes = Set(PaneHost.shared.terms.keys)
         applyHotKey()
         store.$hotkey
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.applyHotKey() }
+            .store(in: &bag)
+
+        // live panes recolor when the theme changes
+        store.$themeID
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] id in
+                if let t = themes.first(where: { $0.id == id }) {
+                    PaneHost.shared.applyTheme(t)
+                    terminalBG = t.ink
+                    self?.refreshGhostChrome()
+                }
+            }
+            .store(in: &bag)
+        store.$sharpCorners
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshGhostChrome() }
             .store(in: &bag)
 
         // kill the old processes before SwiftUI (.id change) attaches fresh ones
@@ -638,6 +1030,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.scheduleCollapse()
         }
+
+        startCommandSocket()
+    }
+
+    // MARK: atoll command socket
+    //
+    // A tiny AF_UNIX server (~/.config/atoll/atoll.sock) so scripts can drive
+    // the island:  atollctl <toggle|expand|collapse|select <tab>|flash <msg>|status>
+    func startCommandSocket() {
+        let path = Config.dir + "/atoll.sock"
+        try? FileManager.default.removeItem(atPath: path) // stale socket from a crash
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { ptr in
+            path.utf8CString.withUnsafeBufferPointer { src in
+                let n = min(src.count - 1, ptr.count - 1)
+                ptr.baseAddress!.copyMemory(from: src.baseAddress!, byteCount: n)
+            }
+        }
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0, listen(fd, 4) == 0 else { close(fd); return }
+        DispatchQueue.global(qos: .utility).async {
+            while true {
+                let c = accept(fd, nil, nil)
+                guard c >= 0 else { break }
+                DispatchQueue.global().async {
+                    defer { close(c) }
+                    self.handleCommandConn(c)
+                }
+            }
+        }
+    }
+
+    func handleCommandConn(_ fd: Int32) {
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = read(fd, &buf, buf.count - 1)
+        guard n > 0 else { return }
+        let line = String(decoding: buf[0..<n], as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        let reply = handleCommand(line)
+        reply.data(using: .utf8)?.withUnsafeBytes { raw in
+            _ = write(fd, raw.baseAddress, raw.count)
+        }
+    }
+
+    func handleCommand(_ line: String) -> String {
+        let parts = line.split(maxSplits: 1, omittingEmptySubsequences: true) { $0 == " " }
+        let cmd = parts.first.map(String.init) ?? ""
+        let arg = parts.count > 1 ? String(parts[1]) : ""
+        switch cmd {
+        case "toggle":
+            DispatchQueue.main.sync { toggleIsland() }
+            return "ok\n"
+        case "expand", "collapse":
+            DispatchQueue.main.sync { setExpanded(cmd == "expand") }
+            return "ok\n"
+        case "select":
+            guard !arg.isEmpty else { return "err: select needs a tab name\n" }
+            var hit: String?
+            DispatchQueue.main.sync {
+                store.reloadTabs() // pick up tabs.json edits even while expanded
+                if let t = store.tabs.first(where: { $0.name.lowercased() == arg.lowercased() }) {
+                    hit = t.name
+                    store.selected = t.name
+                    setExpanded(true)
+                    typedSinceExpand = true
+                }
+            }
+            return hit != nil ? "ok\n" : "err: no tab named \(arg)\n"
+        case "flash":
+            guard !arg.isEmpty else { return "err: flash needs a message\n" }
+            DispatchQueue.main.sync { store.showFlash(String(arg.prefix(48))) }
+            return "ok\n"
+        case "status":
+            var out = ""
+            DispatchQueue.main.sync {
+                out = """
+                expanded=\(store.expanded)
+                selected=\(store.selected)
+                tabs=\(store.tabs.map(\.name).joined(separator: ","))
+                live=\(PaneHost.shared.terms.keys.sorted().joined(separator: ","))
+                """
+            }
+            return out + "\n"
+        default:
+            return "err: unknown command '\(cmd)'. usage: atollctl <toggle|expand|collapse|select <tab>|flash <msg>|status>\n"
+        }
     }
 
     var collapseTimer: Timer?
@@ -645,6 +1131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         PaneHost.shared.shutdownAll()
+        WebHost.shared.shutdownAll()
     }
 
     func hoverChanged(_ h: Bool) {
@@ -695,11 +1182,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let v = NSView()
         v.wantsLayer = true
         v.layer?.backgroundColor = terminalBG.cgColor
-        v.layer?.cornerRadius = 14
+        v.layer?.cornerRadius = store.panelRadius
         v.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         g.contentView = v
         return g
     }()
+
+    // keep the resize ghost in step with the current theme + corner pref
+    func refreshGhostChrome() {
+        guard let v = ghost.contentView else { return }
+        v.wantsLayer = true
+        v.layer?.backgroundColor = terminalBG.cgColor
+        v.layer?.cornerRadius = store.panelRadius
+    }
 
     func resizeDrag(ended: Bool) {
         let sc = screen

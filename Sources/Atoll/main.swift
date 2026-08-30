@@ -138,6 +138,11 @@ final class Store: ObservableObject {
     @Published var sharpCorners: Bool = UserDefaults.standard.object(forKey: "sharpCorners") as? Bool ?? false {
         didSet { UserDefaults.standard.set(sharpCorners, forKey: "sharpCorners") }
     }
+    // off: the collapsed pill hides inside the notch and the expanded island
+    // hangs below the menu bar instead of covering it
+    @Published var overMenuBar: Bool = UserDefaults.standard.object(forKey: "overMenuBar") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(overMenuBar, forKey: "overMenuBar") }
+    }
     var pillRadius: CGFloat { sharpCorners ? 4 : 18 }
     var panelRadius: CGFloat { sharpCorners ? 2 : 14 }
     var chipRadius: CGFloat { sharpCorners ? 1 : 8 }
@@ -598,11 +603,11 @@ struct IslandView: View {
                             if store.addingTab { addCard.padding(.top, 4) }
                         }
                 }
-                .padding(.top, notchH + 8)
+                .padding(.top, (store.overMenuBar ? notchH : 0) + 8)
                 .opacity(store.expanded && !store.resizing ? 1 : 0)
                 .allowsHitTesting(store.expanded && !store.resizing)
             }
-            .overlay(alignment: .bottom) { if !store.expanded { pillDots } }
+            .overlay(alignment: .bottom) { if !store.expanded && store.overMenuBar { pillDots } }
             .overlay(alignment: .bottomTrailing) {
                 if store.expanded { resizeGrip }
             }
@@ -632,6 +637,7 @@ struct IslandView: View {
                     ForEach(themes, id: \.id) { th in Text(th.name).tag(th.id) }
                 }
                 Toggle("Sharp corners", isOn: $store.sharpCorners)
+                Toggle("Show Over Menu Bar", isOn: $store.overMenuBar)
                 Divider()
                 Button("Edit Tabs…") {
                     NSWorkspace.shared.open(URL(fileURLWithPath: Config.tabsFile))
@@ -928,6 +934,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     // tab bar (22) + gap (6) between the notch padding and the pane
     let tabBarH: CGFloat = 28
+    // menu-bar rows the expanded island covers: all of them, or none (hangs below)
+    var topPad: CGFloat { store.overMenuBar ? notchH : 0 }
+    var notchRect: NSRect {
+        let sc = screen
+        return NSRect(x: sc.frame.midX - notchW / 2, y: sc.frame.maxY - notchH, width: notchW, height: notchH)
+    }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         panel = IslandPanel(
@@ -968,6 +980,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.applyHotKey() }
+            .store(in: &bag)
+        store.$overMenuBar
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in guard let self else { return }; self.setExpanded(self.store.expanded) }
             .store(in: &bag)
 
         // live panes recolor when the theme changes
@@ -1152,7 +1169,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         collapseTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             guard let self else { return }
             if self.dragStartSize != nil { return } // never collapse mid-resize
-            if self.panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation) { return }
+            let m = NSEvent.mouseLocation
+            if self.panel.frame.insetBy(dx: -8, dy: -8).contains(m) { return }
+            // below-menu-bar mode: the island hangs under the notch, so a cursor
+            // parked in the notch is outside the frame but still "on" the island
+            if self.notchRect.contains(m) { return }
             // pinned only when the user actually typed into the pane
             if self.panel.isKeyWindow && self.typedSinceExpand { return }
             self.collapseTimer?.invalidate()
@@ -1227,9 +1248,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let pw = max(notchW + 40, w + 24)
-        let ph = notchH + 8 + tabBarH + h + 16
+        let ph = topPad + 8 + tabBarH + h + 16
         ghost.setFrame(
-            NSRect(x: sc.frame.midX - pw / 2, y: sc.frame.maxY - ph, width: pw, height: ph),
+            NSRect(x: sc.frame.midX - pw / 2, y: sc.frame.maxY - (notchH - topPad) - ph, width: pw, height: ph),
             display: true)
     }
 
@@ -1242,16 +1263,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let sc = screen
         let w: CGFloat
         let h: CGFloat
+        var top: CGFloat = 0 // gap between screen top and the panel
         if e {
             w = max(notchW + 40, store.termW + 24)
-            h = min(notchH + 8 + tabBarH + store.termH + 16, sc.frame.height * 0.8)
+            h = min(topPad + 8 + tabBarH + store.termH + 16, sc.frame.height * 0.8)
+            top = notchH - topPad
         } else {
-            w = notchW + 16
+            w = store.overMenuBar ? notchW + 16 : notchW // exact notch = invisible
             h = notchH > 0 ? notchH : 22
         }
         let f = NSRect(
             x: sc.frame.midX - w / 2,
-            y: sc.frame.maxY - h,
+            y: sc.frame.maxY - top - h,
             width: w, height: h)
         if f != panel.frame {
             // animate only expand/collapse transitions; drag-resize must track 1:1
